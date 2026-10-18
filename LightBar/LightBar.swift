@@ -162,6 +162,7 @@ final class Controller: ObservableObject {
     @Published var homeOnly: Bool { didSet { UserDefaults.standard.set(homeOnly, forKey: "homeOnly"); if homeOnly && homeNetwork.isEmpty { setHomeHere() } else { q.async { self.networkChanged() } } } }
     @Published var homeNetwork: String { didSet { UserDefaults.standard.set(homeNetwork, forKey: "homeNetwork") } }
     @Published var atHome = true
+    @Published var lockDim: Double { didSet { UserDefaults.standard.set(lockDim, forKey: "lockDim") } }   // 锁屏后先调暗到的亮度（%）
     @Published var dayTotal: Double { didSet { UserDefaults.standard.set(dayTotal, forKey: "dayTotal"); targetsChanged() } }
     @Published var nightTotal: Double { didSet { UserDefaults.standard.set(nightTotal, forKey: "nightTotal"); targetsChanged() } }
     @Published var ctFollow: Bool { didSet { UserDefaults.standard.set(ctFollow, forKey: "ctFollow"); targetsChanged() } }
@@ -186,12 +187,13 @@ final class Controller: ObservableObject {
 
     init() {
         let d = UserDefaults.standard
-        d.register(defaults: ["auto": true, "lockLink": true, "dayTotal": 400.0, "nightTotal": 300.0, "ctFollow": false, "dayCT": 4800.0, "nightCT": 3500.0, "dayStart": 7, "nightStart": 18, "homeOnly": true, "homeNetwork": ""])
+        d.register(defaults: ["auto": true, "lockLink": true, "dayTotal": 400.0, "nightTotal": 300.0, "ctFollow": false, "dayCT": 4800.0, "nightCT": 3500.0, "dayStart": 7, "nightStart": 18, "homeOnly": true, "homeNetwork": "", "lockDim": 10.0])
         autoEnabled = d.bool(forKey: "auto"); lockLinkEnabled = d.bool(forKey: "lockLink")
         dayTotal = d.double(forKey: "dayTotal"); nightTotal = d.double(forKey: "nightTotal")
         ctFollow = d.bool(forKey: "ctFollow")
         dayCT = d.double(forKey: "dayCT"); nightCT = d.double(forKey: "nightCT")
         dayStart = d.integer(forKey: "dayStart"); nightStart = d.integer(forKey: "nightStart")
+        lockDim = d.double(forKey: "lockDim")
         homeOnly = d.bool(forKey: "homeOnly"); homeNetwork = d.string(forKey: "homeNetwork") ?? ""
         gain = Controller.loadGain()
 
@@ -368,14 +370,38 @@ final class Controller: ObservableObject {
     // MARK: 锁屏联动
 
     var pendingOff: DispatchWorkItem?
+    var dimmed: (fromB: Int, fromCT: Int, toB: Int)? = nil   // 锁屏调暗前的亮度 / 色温，解锁时恢复
 
-    /// now: 立刻执行；否则“关灯”要等 lockOffDelay，期间解锁 / 亮屏就取消（系统睡眠时定时器不走，所以睡眠总是立刻关）
+    /// 锁屏后先调暗：灯开着且比 lockDim 亮才调
+    func dimForLock(_ why: String) {
+        guard dimmed == nil, checkHome() else { return }
+        let (rc, out) = lamp(["json"])
+        guard rc == 0, let j = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any],
+              let isOn = j["on"] as? Bool, isOn, let b = j["bright"] as? Int, let k = j["ct"] as? Int else { return }
+        let to = Int(lockDim)
+        guard b > to else { return }
+        dimmed = (b, k, to)
+        log("\(why) → 先调暗 \(b)→\(to)%")
+        startRamp(fromB: b, fromCT: k, toB: to, toCT: k)
+    }
+
+    /// 解锁时把锁屏调暗的亮度恢复：自动调光开着就按环境光重算，否则回到调暗前的亮度
+    func restoreFromDim(_ why: String) {
+        guard let d = dimmed else { return }
+        dimmed = nil
+        if autoEnabled && !manualHold { autoAdjust(force: true) }
+        else { log("\(why) → 恢复亮度 \(d.toB)→\(d.fromB)%"); startRamp(fromB: d.toB, fromCT: d.fromCT, toB: d.fromB, toCT: d.fromCT) }
+    }
+
+    /// now: 立刻执行；否则锁屏 / 屏幕关闭时先调暗，等 lockOffDelay 仍没解锁再关灯，期间解锁就恢复（系统睡眠时定时器不走，所以睡眠总是立刻关）
     func applyPower(_ why: String, now: Bool = false) {
         guard lockLinkEnabled else { return }
         let want = !locked && !asleep
         if want || now { pendingOff?.cancel(); pendingOff = nil }
+        if want && appliedOn != false && dimmed != nil { restoreFromDim(why); return }   // 关灯前就回来了
         if !want && !now && appliedOn != false {
             if pendingOff == nil {
+                dimForLock(why)
                 let w = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     self.pendingOff = nil
@@ -397,7 +423,7 @@ final class Controller: ObservableObject {
             if want {
                 lastAuto = nil; lastAutoCT = nil
                 // 云端刚写入“开”时立刻读回会拿到旧状态（还是关），等几秒再按环境光调光
-                q.asyncAfter(deadline: .now() + 3) { if !self.locked && !self.asleep { self.autoAdjust(force: true) } }
+                q.asyncAfter(deadline: .now() + 3) { if !self.locked && !self.asleep { if self.dimmed != nil { self.restoreFromDim(why) } else { self.autoAdjust(force: true) } } }
             } else { refresh() }
         } else {
             log("控制失败(\(why)): \(out)")
@@ -813,6 +839,8 @@ struct Popover: View {
                     settingRow("夜间目标色温", "\(Int(c.nightCT))K") { Stepper("", value: $c.nightCT, in: 2700...6500, step: 100).labelsHidden() }.opacity(c.ctFollow ? 0.4 : 1).disabled(c.ctFollow)
                     settingRow("白天开始", "\(c.dayStart):00") { Stepper("", value: $c.dayStart, in: 0...12).labelsHidden() }
                     settingRow("夜间开始", "\(c.nightStart):00") { Stepper("", value: $c.nightStart, in: 13...23).labelsHidden() }
+                    settingRow("锁屏后先调暗到", "\(Int(c.lockDim))%") { Stepper("", value: $c.lockDim, in: 5...50, step: 5).labelsHidden() }
+                        .opacity(c.lockLinkEnabled ? 1 : 0.4).disabled(!c.lockLinkEnabled)
                     settingRow("仅在家里网络时自动控制", "") { Toggle("", isOn: $c.homeOnly).toggleStyle(.switch).labelsHidden() }
                     settingRow("家里网络", c.homeNetwork.isEmpty ? "未设置" : (c.atHome ? "当前在家" : "当前不在家")) {
                         Button("设为当前网络") { c.setHomeHere() }.controlSize(.small)
