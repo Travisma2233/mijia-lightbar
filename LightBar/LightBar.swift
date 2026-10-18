@@ -841,6 +841,13 @@ struct Popover: View {
 @main
 struct LightBarApp: App {
     @StateObject private var c = Controller()
+
+    init() {
+        // 已经有一个在跑（比如开机自启的那个），就直接退出；退出码 0，开机自启不会再把它拉起来
+        let me = ProcessInfo.processInfo.processIdentifier
+        if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "io.github.mijia-lightbar")
+            .contains(where: { $0.processIdentifier != me }) { exit(0) }
+    }
     var body: some Scene {
         MenuBarExtra {
             Popover(c: c)
