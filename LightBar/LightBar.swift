@@ -26,6 +26,7 @@ let home = NSHomeDirectory()
 let calibrationPath = home + "/.config/lamp-calibration.json"
 let logPath = home + "/Library/Logs/lightbar.log"
 let ctPoints: [(Double, Double)] = [(5, 3000), (50, 3500), (150, 4000), (450, 4800), (1500, 5500)]  // 环境光 → 色温（“色温跟随环境光”开启时使用）
+let lockOffDelay = 300.0   // 锁屏 / 屏幕关闭后等这么久仍没解锁才关灯（系统睡眠则立刻关）
 let totalTolerance = 10.0   // 总亮度偏离目标超过这么多才调光
 let pollSeconds = 300.0, minChange = 6.0, minChangeCT = 300.0, minGap = 120.0, manualPause = 1800.0
 
@@ -200,7 +201,7 @@ final class Controller: ObservableObject {
         let w = NSWorkspace.shared.notificationCenter
         w.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = true; self?.applyPower("屏幕关闭") } }
         w.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = false; self?.applyPower("屏幕点亮") } }
-        w.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = true; self?.applyPower("系统睡眠") } }
+        w.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = true; self?.applyPower("系统睡眠", now: true) } }
         w.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = false; self?.applyPower("系统唤醒") } }
         Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { [weak self] _ in self?.q.async { self?.autoAdjust() } }
         // 网络一变（出门、回家、唤醒后重连 Wi-Fi）就重新判断在不在家；等 2 秒让路由和 ARP 落定
@@ -366,9 +367,26 @@ final class Controller: ObservableObject {
 
     // MARK: 锁屏联动
 
-    func applyPower(_ why: String) {
+    var pendingOff: DispatchWorkItem?
+
+    /// now: 立刻执行；否则“关灯”要等 lockOffDelay，期间解锁 / 亮屏就取消（系统睡眠时定时器不走，所以睡眠总是立刻关）
+    func applyPower(_ why: String, now: Bool = false) {
         guard lockLinkEnabled else { return }
         let want = !locked && !asleep
+        if want || now { pendingOff?.cancel(); pendingOff = nil }
+        if !want && !now && appliedOn != false {
+            if pendingOff == nil {
+                let w = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.pendingOff = nil
+                    if self.locked || self.asleep { self.applyPower("\(why) \(Int(lockOffDelay / 60)) 分钟后仍未解锁", now: true) }
+                }
+                pendingOff = w
+                q.asyncAfter(deadline: .now() + lockOffDelay, execute: w)
+                log("\(why)：\(Int(lockOffDelay / 60)) 分钟内没有解锁就关灯")
+            }
+            return
+        }
         if appliedOn == want { return }
         guard checkHome() else { log("\(why)：不在家里网络，不控制灯"); return }
         rampGen += 1
