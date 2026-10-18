@@ -421,7 +421,7 @@ func kelvinColor(_ k: Double) -> Color {
     return Color(red: c(r), green: c(g), blue: c(b))
 }
 
-/// 挂在显示器上的挂灯：灯条颜色随色温，光晕和照在屏幕上的光随亮度；关灯时灯条熄灭
+/// 挂在显示器上的挂灯：灯条发光颜色随色温，光晕与照在屏幕上的光随亮度；关灯时灯条熄灭
 struct LampPreview: View, Animatable {
     var level: Double      // 亮度 0–100；关灯为 0
     var ct: Double
@@ -429,51 +429,110 @@ struct LampPreview: View, Animatable {
         get { AnimatablePair(level, ct) }
         set { level = newValue.first; ct = newValue.second }
     }
+
     var body: some View {
         let on = level > 0.5
-        let bright = level
-        let color = kelvinColor(ct)
-        let glow = on ? min(1, 0.25 + 0.75 * bright / 100) : 0
+        let glow = on ? min(1, 0.34 + 0.66 * level / 100) : 0
+        let tint = kelvinColor(ct)
         Canvas { ctx, size in
-            let w = size.width, h = size.height
-            let mon = CGRect(x: 4, y: 20, width: w - 8, height: h - 38)           // 显示器外框
-            let screen = mon.insetBy(dx: 3.5, dy: 3.5)                             // 屏幕
-            // 底座
-            var stand = Path()
-            stand.move(to: CGPoint(x: w / 2 - 5, y: mon.maxY)); stand.addLine(to: CGPoint(x: w / 2 + 5, y: mon.maxY))
-            stand.addLine(to: CGPoint(x: w / 2 + 8, y: h - 7)); stand.addLine(to: CGPoint(x: w / 2 - 8, y: h - 7)); stand.closeSubpath()
-            ctx.fill(stand, with: .color(Color(white: 0.35)))
-            ctx.fill(Path(roundedRect: CGRect(x: w / 2 - 17, y: h - 7, width: 34, height: 4), cornerRadius: 2), with: .color(Color(white: 0.3)))
-            // 外框与屏幕
-            ctx.fill(Path(roundedRect: mon, cornerRadius: 6), with: .color(Color(white: 0.16)))
-            ctx.fill(Path(roundedRect: screen, cornerRadius: 3.5),
-                     with: .linearGradient(Gradient(colors: [Color(red: 0.16, green: 0.2, blue: 0.3), Color(red: 0.08, green: 0.1, blue: 0.16)]),
-                                           startPoint: CGPoint(x: 0, y: screen.minY), endPoint: CGPoint(x: 0, y: screen.maxY)))
-            // 照在屏幕上的光（梯形，向下渐隐）
+            let w = size.width
+            let cx = w / 2
+            let alu = Gradient(colors: [Color(red: 0.90, green: 0.91, blue: 0.93), Color(red: 0.70, green: 0.72, blue: 0.76)])
+            func vgrad(_ g: Gradient, _ r: CGRect) -> GraphicsContext.Shading {
+                .linearGradient(g, startPoint: CGPoint(x: 0, y: r.minY), endPoint: CGPoint(x: 0, y: r.maxY))
+            }
+
+            // —— 桌面投影 ——
+            var shadow = ctx
+            shadow.addFilter(.blur(radius: 3))
+            shadow.fill(Path(ellipseIn: CGRect(x: cx - 24, y: 78.5, width: 48, height: 5)), with: .color(.black.opacity(0.22)))
+
+            // —— 支架：颈部 + 底座 ——
+            var neck = Path()
+            neck.move(to: CGPoint(x: cx - 5, y: 66)); neck.addLine(to: CGPoint(x: cx + 5, y: 66))
+            neck.addLine(to: CGPoint(x: cx + 7.5, y: 77.5)); neck.addLine(to: CGPoint(x: cx - 7.5, y: 77.5)); neck.closeSubpath()
+            ctx.fill(neck, with: .linearGradient(Gradient(colors: [Color(red: 0.62, green: 0.64, blue: 0.68), Color(red: 0.84, green: 0.85, blue: 0.88), Color(red: 0.62, green: 0.64, blue: 0.68)]),
+                                                 startPoint: CGPoint(x: cx - 7, y: 0), endPoint: CGPoint(x: cx + 7, y: 0)))
+            let base = CGRect(x: cx - 18, y: 77, width: 36, height: 3.6)
+            ctx.fill(Path(roundedRect: base, cornerRadius: 1.8), with: vgrad(alu, base))
+
+            // —— 挂灯的后臂（绕过显示器顶边，在屏幕后面）——
+            ctx.fill(Path(roundedRect: CGRect(x: cx - 2.5, y: 10, width: 5, height: 12), cornerRadius: 1.2), with: .color(Color(white: 0.55)))
+
+            // —— 显示器：铝合金外框 + 黑色玻璃边 + 屏幕 ——
+            let mon = CGRect(x: 5, y: 17.5, width: w - 10, height: 49)
+            ctx.fill(Path(roundedRect: mon, cornerRadius: 5), with: vgrad(alu, mon))
+            ctx.stroke(Path(roundedRect: mon, cornerRadius: 5), with: .color(.black.opacity(0.18)), lineWidth: 0.5)
+            let glass = mon.insetBy(dx: 2, dy: 2)
+            ctx.fill(Path(roundedRect: glass, cornerRadius: 3.4), with: .color(Color(red: 0.03, green: 0.03, blue: 0.04)))
+            let screen = glass.insetBy(dx: 1.6, dy: 1.6)
+            let sp = Path(roundedRect: screen, cornerRadius: 2.2)
+            ctx.fill(sp, with: .linearGradient(Gradient(colors: [Color(red: 0.12, green: 0.16, blue: 0.36), Color(red: 0.27, green: 0.13, blue: 0.40), Color(red: 0.08, green: 0.07, blue: 0.20)]),
+                                               startPoint: CGPoint(x: screen.minX, y: screen.minY), endPoint: CGPoint(x: screen.maxX, y: screen.maxY)))
+            do {   // 屏幕上的界面：菜单栏、窗口、程序坞
+                var ui = ctx
+                ui.clip(to: sp)
+                ui.fill(Path(CGRect(x: screen.minX, y: screen.minY, width: screen.width, height: 3)), with: .color(.black.opacity(0.35)))
+                let win = CGRect(x: screen.minX + 8, y: screen.minY + 9, width: screen.width * 0.52, height: screen.height * 0.5)
+                ui.fill(Path(roundedRect: win, cornerRadius: 1.6), with: .color(.white.opacity(0.10)))
+                ui.fill(Path(CGRect(x: win.minX, y: win.minY, width: win.width, height: 2.6)), with: .color(.white.opacity(0.10)))
+                for (i, c) in [Color.red, Color.yellow, Color.green].enumerated() {
+                    ui.fill(Path(ellipseIn: CGRect(x: win.minX + 1.6 + Double(i) * 2.4, y: win.minY + 0.85, width: 1.2, height: 1.2)), with: .color(c.opacity(0.75)))
+                }
+                for i in 0..<3 {
+                    ui.fill(Path(roundedRect: CGRect(x: win.minX + 3, y: win.minY + 6 + Double(i) * 3.6, width: win.width * (i == 1 ? 0.5 : 0.7), height: 1.3), cornerRadius: 0.65), with: .color(.white.opacity(0.14)))
+                }
+                ui.fill(Path(roundedRect: CGRect(x: cx - 11, y: screen.maxY - 4.6, width: 22, height: 2.8), cornerRadius: 1.4), with: .color(.white.opacity(0.14)))
+            }
+
+            // —— 灯光：照在屏幕上的光锥（柔边、向下渐隐）——
             if on {
                 var beam = Path()
-                beam.move(to: CGPoint(x: w / 2 - 17, y: mon.minY + 1)); beam.addLine(to: CGPoint(x: w / 2 + 17, y: mon.minY + 1))
-                beam.addLine(to: CGPoint(x: screen.maxX - 2, y: screen.maxY - 2)); beam.addLine(to: CGPoint(x: screen.minX + 2, y: screen.maxY - 2)); beam.closeSubpath()
+                beam.move(to: CGPoint(x: cx - 19, y: 17)); beam.addLine(to: CGPoint(x: cx + 19, y: 17))
+                beam.addLine(to: CGPoint(x: screen.maxX + 2, y: screen.maxY)); beam.addLine(to: CGPoint(x: screen.minX - 2, y: screen.maxY)); beam.closeSubpath()
                 var layer = ctx
-                layer.clip(to: Path(roundedRect: screen, cornerRadius: 3.5))
-                layer.fill(beam, with: .linearGradient(Gradient(colors: [color.opacity(0.55 * glow), color.opacity(0)]),
-                                                       startPoint: CGPoint(x: 0, y: mon.minY), endPoint: CGPoint(x: 0, y: screen.maxY)))
+                layer.clip(to: sp)
+                layer.blendMode = .plusLighter
+                layer.addFilter(.blur(radius: 5))
+                layer.fill(beam, with: .linearGradient(Gradient(colors: [tint.opacity(0.78 * glow), tint.opacity(0.34 * glow), tint.opacity(0.03 * glow)]),
+                                                       startPoint: CGPoint(x: 0, y: 17), endPoint: CGPoint(x: 0, y: screen.maxY)))
+                // 上边框被灯照亮
+                var rim = ctx
+                rim.clip(to: Path(roundedRect: mon, cornerRadius: 5))
+                rim.blendMode = .plusLighter
+                rim.addFilter(.blur(radius: 2))
+                rim.fill(Path(CGRect(x: cx - 24, y: 17.5, width: 48, height: 5)), with: .color(tint.opacity(0.32 * glow)))
             }
-            // 灯条光晕 + 灯条
-            let bar = CGRect(x: w / 2 - 20, y: 9, width: 40, height: 7)
-            if on {
+            // 玻璃反光
+            do {
+                var gl = ctx; gl.clip(to: sp)
+                var p = Path()
+                p.move(to: CGPoint(x: screen.minX + screen.width * 0.52, y: screen.minY)); p.addLine(to: CGPoint(x: screen.minX + screen.width * 0.82, y: screen.minY))
+                p.addLine(to: CGPoint(x: screen.minX + screen.width * 0.40, y: screen.maxY)); p.addLine(to: CGPoint(x: screen.minX + screen.width * 0.10, y: screen.maxY)); p.closeSubpath()
+                gl.fill(p, with: .linearGradient(Gradient(colors: [.white.opacity(0.10), .white.opacity(0.0)]), startPoint: CGPoint(x: 0, y: screen.minY), endPoint: CGPoint(x: 0, y: screen.maxY)))
+            }
+
+            // —— 灯条：金属机身 + 发光槽 ——
+            let bar = CGRect(x: cx - 25, y: 7.6, width: 50, height: 8.6)
+            if on {   // 光晕
                 var g = ctx
-                g.addFilter(.blur(radius: 5 + 5 * glow))
-                g.fill(Path(roundedRect: bar.insetBy(dx: -2, dy: -2), cornerRadius: 5), with: .color(color.opacity(0.9 * glow)))
+                g.blendMode = .plusLighter
+                g.addFilter(.blur(radius: 4 + 5 * glow))
+                g.fill(Path(roundedRect: CGRect(x: bar.minX + 2, y: bar.maxY - 4.5, width: bar.width - 4, height: 4), cornerRadius: 2), with: .color(tint.opacity(0.85 * glow)))
             }
-            // 挂在屏幕顶边的支架
-            ctx.fill(Path(roundedRect: CGRect(x: w / 2 - 3, y: 15, width: 6, height: 8), cornerRadius: 1.5), with: .color(Color(white: on ? 0.6 : 0.4)))
-            let barPath = Path(roundedRect: bar, cornerRadius: 3.5)
-            ctx.fill(barPath, with: on
-                     ? .linearGradient(Gradient(colors: [color, color.opacity(0.82)]), startPoint: CGPoint(x: 0, y: bar.minY), endPoint: CGPoint(x: 0, y: bar.maxY))
-                     : .color(Color(white: 0.45)))
-            ctx.stroke(barPath, with: .color(Color(white: 0.25).opacity(on ? 0.45 : 0.25)), lineWidth: 0.8)   // 描边：白色灯条在浅色背景上也看得清
-            if on { ctx.fill(Path(roundedRect: CGRect(x: bar.minX + 3, y: bar.minY + 1.2, width: bar.width - 6, height: 2), cornerRadius: 1), with: .color(.white.opacity(0.55 * glow))) }
+            let bp = Path(roundedRect: bar, cornerRadius: 4.3)
+            ctx.fill(bp, with: vgrad(Gradient(colors: [Color(red: 0.95, green: 0.95, blue: 0.97), Color(red: 0.74, green: 0.75, blue: 0.79), Color(red: 0.60, green: 0.62, blue: 0.66)]), bar))
+            ctx.stroke(bp, with: .color(.black.opacity(0.22)), lineWidth: 0.6)
+            // 发光槽（机身下沿）
+            let slot = CGRect(x: bar.minX + 4, y: bar.maxY - 3.9, width: bar.width - 8, height: 2.3)
+            let sp2 = Path(roundedRect: slot, cornerRadius: 1.15)
+            if on {
+                ctx.fill(sp2, with: .linearGradient(Gradient(colors: [.white.opacity(0.9), tint]), startPoint: CGPoint(x: 0, y: slot.minY), endPoint: CGPoint(x: 0, y: slot.maxY)))
+            } else {
+                ctx.fill(sp2, with: .color(Color(red: 0.36, green: 0.37, blue: 0.40)))
+            }
+            // 机身高光
+            ctx.fill(Path(roundedRect: CGRect(x: bar.minX + 5, y: bar.minY + 1.0, width: bar.width - 10, height: 1.3), cornerRadius: 0.65), with: .color(.white.opacity(0.65)))
         }
     }
 }
@@ -532,7 +591,7 @@ struct Popover: View {
                     LampPreview(level: c.on ? c.bright : 0, ct: c.ct)
                         .animation(.easeInOut(duration: 0.5), value: c.on ? c.bright : 0)
                         .animation(.easeInOut(duration: 0.5), value: c.ct)
-                        .frame(width: 76, height: 84)
+                        .frame(width: 92, height: 86)
                 }
             }.disabled(!c.on)
 
