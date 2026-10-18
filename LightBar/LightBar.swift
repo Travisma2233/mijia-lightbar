@@ -421,11 +421,40 @@ func kelvinColor(_ k: Double) -> Color {
     return Color(red: c(r), green: c(g), blue: c(b))
 }
 
+/// 当前壁纸（锁屏默认沿用桌面壁纸）：动态/航拍壁纸用系统缓存的静态缩略图，普通图片直接读文件；读不到返回 nil
+func currentWallpaper() -> NSImage? {
+    func firstFileURL(_ obj: Any?) -> URL? {
+        if let str = obj as? String, str.hasPrefix("file://") { return URL(string: str) }
+        if let d = obj as? [String: Any] { for v in d.values { if let u = firstFileURL(v) { return u } } }
+        if let a = obj as? [Any] { for v in a { if let u = firstFileURL(v) { return u } } }
+        return nil
+    }
+    let base = NSHomeDirectory() + "/Library/Application Support/com.apple.wallpaper"
+    if let data = FileManager.default.contents(atPath: base + "/Store/Index.plist"),
+       let root = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+        for key in ["AllSpacesAndDisplays", "SystemDefault"] {
+            guard let linked = (root[key] as? [String: Any])?["Linked"] as? [String: Any],
+                  let content = linked["Content"] as? [String: Any],
+                  let ch = (content["Choices"] as? [[String: Any]])?.first else { continue }
+            if let cfgData = ch["Configuration"] as? Data,
+               let cfg = try? PropertyListSerialization.propertyList(from: cfgData, format: nil) {
+                if let id = (cfg as? [String: Any])?["assetID"] as? String,
+                   let img = NSImage(contentsOfFile: base + "/aerials/thumbnails/\(id).png") { return img }
+                if let u = firstFileURL(cfg), let img = NSImage(contentsOf: u) { return img }
+            }
+            if let u = firstFileURL(ch["Files"]), let img = NSImage(contentsOf: u) { return img }
+        }
+    }
+    if let scr = NSScreen.main, let u = NSWorkspace.shared.desktopImageURL(for: scr), let img = NSImage(contentsOf: u) { return img }
+    return nil
+}
+
 /// 实物示意：黑色窄边框显示器 + 哑光黑色圆柱挂灯（中间卡扣挂在顶边）。
 /// 灯条下沿的发光条颜色随色温，光晕随亮度；关灯时发光条熄灭
 struct LampPreview: View, Animatable {
     var level: Double      // 亮度 0–100；关灯为 0
     var ct: Double
+    var wallpaper: NSImage? = nil   // 屏幕上显示的壁纸；nil 时画一幅示意的红杉林
     var animatableData: AnimatablePair<Double, Double> {   // 让亮度和色温的变化在示意图上平滑过渡
         get { AnimatablePair(level, ct) }
         set { level = newValue.first; ct = newValue.second }
@@ -433,7 +462,7 @@ struct LampPreview: View, Animatable {
 
     var body: some View {
         let on = level > 0.5
-        let glow = on ? min(1, 0.34 + 0.66 * level / 100) : 0
+        let glow = on ? 0.04 + 0.96 * pow(level / 100, 0.8) : 0   // 低亮度几乎暗淡，高亮度很强：对比明显
         let tint = kelvinColor(ct)
         Canvas { ctx, size in
             let w = size.width
@@ -464,8 +493,23 @@ struct LampPreview: View, Animatable {
             let screen = CGRect(x: mon.minX + 1.7, y: mon.minY + 1.7, width: mon.width - 3.4, height: mon.height - 1.7 - 3.2)
             let scP = Path(roundedRect: screen, cornerRadius: 0.8)
 
-            // 屏幕：红杉林壁纸（天空、树干、雾气、光束）
-            do {
+            // 屏幕：用户的壁纸（带迷你锁屏时钟）；读不到壁纸时画一幅示意的红杉林
+            if let wp = wallpaper {
+                var s = ctx
+                s.clip(to: scP)
+                let img = s.resolve(Image(nsImage: wp))
+                let ar = wp.size.width / max(wp.size.height, 1), sr = screen.width / screen.height
+                let dw = ar > sr ? screen.height * ar : screen.width, dh = ar > sr ? screen.height : screen.width / ar
+                s.draw(img, in: CGRect(x: screen.midX - dw / 2, y: screen.midY - dh / 2, width: dw, height: dh))
+                s.fill(scP, with: .linearGradient(Gradient(colors: [.black.opacity(0.18), .black.opacity(0.0), .black.opacity(0.22)]),
+                                                  startPoint: CGPoint(x: 0, y: screen.minY), endPoint: CGPoint(x: 0, y: screen.maxY)))
+                let f = DateFormatter(); f.dateFormat = "H:mm"
+                s.draw(Text(f.string(from: Date())).font(.system(size: 9.5, weight: .semibold, design: .rounded)).foregroundColor(.white.opacity(0.92)),
+                       at: CGPoint(x: screen.midX, y: screen.minY + 9.5), anchor: .center)
+                s.fill(Path(roundedRect: CGRect(x: screen.midX - 7, y: screen.minY + 16.2, width: 14, height: 1.1), cornerRadius: 0.55), with: .color(.white.opacity(0.55)))
+                s.fill(Path(ellipseIn: CGRect(x: screen.midX - 2.8, y: screen.maxY - 12, width: 5.6, height: 5.6)), with: .color(.white.opacity(0.55)))
+                s.fill(Path(roundedRect: CGRect(x: screen.midX - 6, y: screen.maxY - 5, width: 12, height: 1.2), cornerRadius: 0.6), with: .color(.white.opacity(0.5)))
+            } else {
                 var s = ctx
                 s.clip(to: scP)
                 s.fill(scP, with: .linearGradient(Gradient(colors: [Color(red: 0.50, green: 0.58, blue: 0.76), Color(red: 0.42, green: 0.48, blue: 0.50), Color(red: 0.15, green: 0.24, blue: 0.16)]),
@@ -506,12 +550,12 @@ struct LampPreview: View, Animatable {
                 lit.clip(to: monP)
                 lit.blendMode = .plusLighter
                 lit.addFilter(.blur(radius: 3.2))
-                lit.fill(Path(CGRect(x: cx - 36, y: mon.minY - 1, width: 72, height: 7)), with: .color(tint.opacity(0.40 * glow)))
+                lit.fill(Path(CGRect(x: cx - 38, y: mon.minY - 1, width: 76, height: 8)), with: .color(tint.opacity(0.65 * glow)))
                 var spill = ctx
                 spill.clip(to: scP)
                 spill.blendMode = .plusLighter
                 spill.addFilter(.blur(radius: 5))
-                spill.fill(Path(ellipseIn: CGRect(x: cx - 34, y: screen.minY - 6, width: 68, height: 16)), with: .color(tint.opacity(0.15 * glow)))
+                spill.fill(Path(ellipseIn: CGRect(x: cx - 36, y: screen.minY - 6, width: 72, height: 10 + 16 * glow)), with: .color(tint.opacity(0.32 * glow)))
             }
             // 玻璃反光
             do {
@@ -533,8 +577,8 @@ struct LampPreview: View, Animatable {
             if on {
                 var g = ctx
                 g.blendMode = .plusLighter
-                g.addFilter(.blur(radius: 3.5 + 4 * glow))
-                g.fill(Path(roundedRect: CGRect(x: bar.minX + 4, y: bar.maxY - 2.4, width: bar.width - 8, height: 3.2), cornerRadius: 1.6), with: .color(tint.opacity(0.80 * glow)))
+                g.addFilter(.blur(radius: 2 + 7 * glow))
+                g.fill(Path(roundedRect: CGRect(x: bar.minX + 4, y: bar.maxY - 2.4, width: bar.width - 8, height: 3.2), cornerRadius: 1.6), with: .color(tint.opacity(1.0 * glow)))
             }
             let bp = Path(roundedRect: bar, cornerRadius: bar.height / 2)
             ctx.fill(bp, with: vgrad([Color(white: 0.34), Color(white: 0.14), Color(white: 0.05)], bar))
@@ -542,9 +586,9 @@ struct LampPreview: View, Animatable {
             // 圆柱高光
             ctx.fill(Path(roundedRect: CGRect(x: bar.minX + 4, y: bar.minY + 0.9, width: bar.width - 8, height: 0.9), cornerRadius: 0.45), with: .color(.white.opacity(0.32)))
             // 下沿发光条
-            let slot = CGRect(x: bar.minX + 3.2, y: bar.maxY - 1.9, width: bar.width - 6.4, height: 1.0)
+            let slot = CGRect(x: bar.minX + 3.2, y: bar.maxY - 1.7 - 0.6 * glow, width: bar.width - 6.4, height: 0.7 + 0.9 * glow)
             if on {
-                ctx.fill(Path(roundedRect: slot, cornerRadius: 0.5), with: .linearGradient(Gradient(colors: [.white.opacity(0.95), tint]), startPoint: CGPoint(x: 0, y: slot.minY), endPoint: CGPoint(x: 0, y: slot.maxY)))
+                ctx.fill(Path(roundedRect: slot, cornerRadius: 0.5), with: .linearGradient(Gradient(colors: [.white.opacity(0.95 * (0.3 + 0.7 * glow)), tint.opacity(0.35 + 0.65 * glow)]), startPoint: CGPoint(x: 0, y: slot.minY), endPoint: CGPoint(x: 0, y: slot.maxY)))
             }
         }
     }
@@ -570,7 +614,10 @@ struct SliderRow: View {
     }
 }
 
-final class UIState: ObservableObject { @Published var showSettings = false }
+final class UIState: ObservableObject {
+    @Published var showSettings = false
+    @Published var wallpaper: NSImage? = currentWallpaper()
+}
 
 struct Popover: View {
     @ObservedObject var c: Controller
@@ -601,7 +648,7 @@ struct Popover: View {
                             c.setManual(bright: Int(c.bright), ct: Int(c.ct))
                         }, onEditing: { c.editing = $0 })
                     }
-                    LampPreview(level: c.on ? c.bright : 0, ct: c.ct)
+                    LampPreview(level: c.on ? c.bright : 0, ct: c.ct, wallpaper: ui.wallpaper)
                         .animation(.easeInOut(duration: 0.5), value: c.on ? c.bright : 0)
                         .animation(.easeInOut(duration: 0.5), value: c.ct)
                         .frame(width: 108, height: 86)
@@ -665,7 +712,7 @@ struct Popover: View {
         .padding(16)
         .frame(width: 330)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { c.q.async { c.refresh(); c.updateReadings() } }
+        .onAppear { ui.wallpaper = currentWallpaper(); c.q.async { c.refresh(); c.updateReadings() } }
     }
 
     func settingRow<S: View>(_ title: String, _ value: String, @ViewBuilder _ control: () -> S) -> some View {
