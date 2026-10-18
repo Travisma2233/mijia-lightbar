@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import IOKit
+import Network
 
 // MARK: - 环境光传感器（Apple Silicon 私有 HID 接口，无需摄像头）
 
@@ -33,6 +34,33 @@ func log(_ s: String) {
     let line = "\(f.string(from: Date())) \(s)\n"
     if let h = FileHandle(forWritingAtPath: logPath) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
     else { try? line.write(toFile: logPath, atomically: true, encoding: .utf8) }
+}
+
+// MARK: - 家里网络识别
+// 用“路由器 IP + 子网掩码 + DHCP 服务器”认家：读 Wi-Fi 名称要定位权限，读路由器 MAC 要本地网络权限，这个都不需要；插网线也能认
+
+func shell(_ path: String, _ args: [String]) -> String {
+    let p = Process(); p.launchPath = path; p.arguments = args
+    let o = Pipe(); p.standardOutput = o; p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return "" }
+    let d = o.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+    return String(data: d, encoding: .utf8) ?? ""
+}
+
+/// 当前网络的特征串，如 "router=192.168.1.1;mask=255.255.255.0;dhcp=192.168.1.1"；没联网时返回 nil
+func currentNetworkID() -> String? {
+    func field(_ text: String, _ key: String) -> String? {
+        guard let line = text.split(separator: "\n").first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix(key) }),
+              let v = line.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces), !v.isEmpty else { return nil }
+        return v
+    }
+    let r = shell("/sbin/route", ["-n", "get", "default"])
+    guard let router = field(r, "gateway:"), let ifname = field(r, "interface:") else { return nil }
+    let pkt = shell("/usr/sbin/ipconfig", ["getpacket", ifname])   // 静态 IP 没有 DHCP 包，就只用路由器 IP
+    var id = "router=\(router)"
+    if let m = field(pkt, "subnet_mask (ip)") { id += ";mask=\(m)" }
+    if let d = field(pkt, "server_identifier (ip)") { id += ";dhcp=\(d)" }
+    return id
 }
 
 /// 常驻的 lamp-serve 进程：保持云端连接，一次调用约 0.3 秒；所有调用串行化
@@ -129,6 +157,10 @@ final class Controller: ObservableObject {
     @Published var busy = ""
     @Published var autoEnabled: Bool { didSet { UserDefaults.standard.set(autoEnabled, forKey: "auto"); if autoEnabled { manualHold = false; q.async { self.autoAdjust(force: true) } } } }
     @Published var lockLinkEnabled: Bool { didSet { UserDefaults.standard.set(lockLinkEnabled, forKey: "lockLink") } }
+    // 只在家里网络时自动控制：带笔记本出门后，锁屏联动和自动调光都不再动家里的灯（手动操作不受影响）
+    @Published var homeOnly: Bool { didSet { UserDefaults.standard.set(homeOnly, forKey: "homeOnly"); if homeOnly && homeNetwork.isEmpty { setHomeHere() } else { q.async { self.networkChanged() } } } }
+    @Published var homeNetwork: String { didSet { UserDefaults.standard.set(homeNetwork, forKey: "homeNetwork") } }
+    @Published var atHome = true
     @Published var dayTotal: Double { didSet { UserDefaults.standard.set(dayTotal, forKey: "dayTotal"); targetsChanged() } }
     @Published var nightTotal: Double { didSet { UserDefaults.standard.set(nightTotal, forKey: "nightTotal"); targetsChanged() } }
     @Published var ctFollow: Bool { didSet { UserDefaults.standard.set(ctFollow, forKey: "ctFollow"); targetsChanged() } }
@@ -138,6 +170,8 @@ final class Controller: ObservableObject {
     @Published var nightStart: Int { didSet { UserDefaults.standard.set(nightStart, forKey: "nightStart"); targetsChanged() } }
 
     let q = DispatchQueue(label: "lightbar")
+    let pathMonitor = NWPathMonitor()
+    var lastHome: Bool? = nil
     var locked = false, asleep = false, appliedOn: Bool? = nil
     var lastAuto: Int? = nil, lastAutoCT: Int? = nil, lastChange = Date.distantPast
     var history: [Double] = []
@@ -151,12 +185,13 @@ final class Controller: ObservableObject {
 
     init() {
         let d = UserDefaults.standard
-        d.register(defaults: ["auto": true, "lockLink": true, "dayTotal": 400.0, "nightTotal": 300.0, "ctFollow": false, "dayCT": 4800.0, "nightCT": 3500.0, "dayStart": 7, "nightStart": 18])
+        d.register(defaults: ["auto": true, "lockLink": true, "dayTotal": 400.0, "nightTotal": 300.0, "ctFollow": false, "dayCT": 4800.0, "nightCT": 3500.0, "dayStart": 7, "nightStart": 18, "homeOnly": true, "homeNetwork": ""])
         autoEnabled = d.bool(forKey: "auto"); lockLinkEnabled = d.bool(forKey: "lockLink")
         dayTotal = d.double(forKey: "dayTotal"); nightTotal = d.double(forKey: "nightTotal")
         ctFollow = d.bool(forKey: "ctFollow")
         dayCT = d.double(forKey: "dayCT"); nightCT = d.double(forKey: "nightCT")
         dayStart = d.integer(forKey: "dayStart"); nightStart = d.integer(forKey: "nightStart")
+        homeOnly = d.bool(forKey: "homeOnly"); homeNetwork = d.string(forKey: "homeNetwork") ?? ""
         gain = Controller.loadGain()
 
         let dnc = DistributedNotificationCenter.default()
@@ -168,6 +203,13 @@ final class Controller: ObservableObject {
         w.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = true; self?.applyPower("系统睡眠") } }
         w.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in self?.q.async { self?.asleep = false; self?.applyPower("系统唤醒") } }
         Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { [weak self] _ in self?.q.async { self?.autoAdjust() } }
+        // 网络一变（出门、回家、唤醒后重连 Wi-Fi）就重新判断在不在家；等 2 秒让路由和 ARP 落定
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard path.status == .satisfied else { return }
+            self?.q.asyncAfter(deadline: .now() + 2) { self?.networkChanged() }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "lightbar.net"))
+        if homeOnly && homeNetwork.isEmpty { setHomeHere() }   // 第一次用：把当前网络当作家里网络
         q.async { self.refresh() }
         log("挂灯 App 已启动")
     }
@@ -273,7 +315,7 @@ final class Controller: ObservableObject {
 
     /// 打开浮窗时刷新显示：读一次传感器，按灯当前亮度扣除其贡献；不改动灯
     func updateReadings() {
-        guard on, !settling, let als = readALS() else { return }
+        guard on, !settling, atHome, let als = readALS() else { return }
         let amb = max(als - lampContribution(bright), 1)
         DispatchQueue.main.async { self.sensor = als; self.ambient = amb }
     }
@@ -291,12 +333,44 @@ final class Controller: ObservableObject {
         }
     }
 
+    // MARK: 家里网络
+
+    /// 现在能不能自动控制灯（在 q 上调用）：没开“仅在家里网络”就总是可以，否则当前网络特征要和记住的一致
+    func checkHome() -> Bool {
+        let ok = !homeOnly || (!homeNetwork.isEmpty && currentNetworkID() == homeNetwork)
+        DispatchQueue.main.async { self.atHome = ok }
+        return ok
+    }
+
+    func setHomeHere() {
+        q.async {
+            guard let m = currentNetworkID() else {
+                log("设为家里网络失败：读不到当前网络（没联网？）")
+                self.notifyFail("读不到当前网络，没联网？")
+                return
+            }
+            log("已把当前网络设为家里网络（\(m)）")
+            DispatchQueue.main.async { self.homeNetwork = m; self.q.async { self.networkChanged() } }
+        }
+    }
+
+    func networkChanged() {
+        let home = checkHome()
+        if lastHome != home {
+            if lastHome != nil || !home { log(home ? "回到家里网络，恢复自动控制" : "不在家里网络，暂停自动控制灯") }
+            let back = lastHome == false   // 启动时第一次判断只记下结果，不主动开灯
+            lastHome = home
+            if back { applyPower("回到家里网络"); autoAdjust() }
+        }
+    }
+
     // MARK: 锁屏联动
 
     func applyPower(_ why: String) {
         guard lockLinkEnabled else { return }
         let want = !locked && !asleep
         if appliedOn == want { return }
+        guard checkHome() else { log("\(why)：不在家里网络，不控制灯"); return }
         rampGen += 1
         let (rc, out) = lamp([want ? "on" : "off"])
         if rc == 0 {
@@ -316,7 +390,7 @@ final class Controller: ObservableObject {
     // MARK: 自动调光（恒定总亮度）
 
     func autoAdjust(force: Bool = false, oneShot: Bool = false) {
-        guard !locked, !asleep else { return }
+        guard !locked, !asleep, checkHome() else { return }
         var reading = readALS()
         for _ in 0..<3 where reading == nil { Thread.sleep(forTimeInterval: 1); reading = readALS() }   // 刚解锁/唤醒时传感器可能暂时读不到
         guard let als = reading else { log("环境光传感器读取失败，跳过本次调光"); return }
@@ -682,7 +756,7 @@ struct Popover: View {
                     Spacer()
                     Button("立即校准") { c.calibrateNow() }
                         .controlSize(.small)
-                        .disabled(!c.busy.isEmpty || !c.on)
+                        .disabled(!c.busy.isEmpty || !c.on || !c.atHome)
                         .help("按当前环境光立刻把总亮度调回目标")
                 }
                 HStack(alignment: .top) {
@@ -703,7 +777,9 @@ struct Popover: View {
                     Text(c.ctFollow ? "随环境光（越暗越暖）" : "\(Int(c.targetCT))K（\(c.isDay ? "白天" : "夜间")）")
                         .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                if !c.autoEnabled {
+                if !c.atHome {
+                    Text("不在家里网络：自动调光和锁屏联动已暂停，手动开关和滑块仍可用。").font(.caption).foregroundStyle(.orange)
+                } else if !c.autoEnabled {
                     Text("自动调光已关闭，灯保持你的设置；打开开关后恢复自动。").font(.caption).foregroundStyle(.secondary)
                 }
                 Toggle(isOn: $c.lockLinkEnabled) {
@@ -719,8 +795,12 @@ struct Popover: View {
                     settingRow("夜间目标色温", "\(Int(c.nightCT))K") { Stepper("", value: $c.nightCT, in: 2700...6500, step: 100).labelsHidden() }.opacity(c.ctFollow ? 0.4 : 1).disabled(c.ctFollow)
                     settingRow("白天开始", "\(c.dayStart):00") { Stepper("", value: $c.dayStart, in: 0...12).labelsHidden() }
                     settingRow("夜间开始", "\(c.nightStart):00") { Stepper("", value: $c.nightStart, in: 13...23).labelsHidden() }
+                    settingRow("仅在家里网络时自动控制", "") { Toggle("", isOn: $c.homeOnly).toggleStyle(.switch).labelsHidden() }
+                    settingRow("家里网络", c.homeNetwork.isEmpty ? "未设置" : (c.atHome ? "当前在家" : "当前不在家")) {
+                        Button("设为当前网络") { c.setHomeHere() }.controlSize(.small)
+                    }.opacity(c.homeOnly ? 1 : 0.4).disabled(!c.homeOnly)
                     HStack {
-                        Button("重新标定") { c.calibrate() }.disabled(!c.busy.isEmpty || !c.on)
+                        Button("重新标定") { c.calibrate() }.disabled(!c.busy.isEmpty || !c.on || !c.atHome)
                         if !c.busy.isEmpty { Text(c.busy).font(.caption).foregroundStyle(.secondary) }
                         Spacer()
                     }
