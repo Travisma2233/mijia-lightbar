@@ -280,6 +280,17 @@ final class Controller: ObservableObject {
 
     func resumeAuto() { manualHold = false; q.async { self.autoAdjust(force: true) } }
 
+    /// 手动校准：用最新一次传感器读数（不与旧读数平均）立刻把总亮度拉回目标；自动调光关着也照做一次，但不改开关状态
+    func calibrateNow() {
+        guard busy.isEmpty else { return }
+        busy = "校准中…"
+        q.async {
+            self.history = []
+            self.autoAdjust(force: true, oneShot: true)
+            DispatchQueue.main.async { self.busy = "" }
+        }
+    }
+
     // MARK: 锁屏联动
 
     func applyPower(_ why: String) {
@@ -304,7 +315,7 @@ final class Controller: ObservableObject {
 
     // MARK: 自动调光（恒定总亮度）
 
-    func autoAdjust(force: Bool = false) {
+    func autoAdjust(force: Bool = false, oneShot: Bool = false) {
         guard !locked, !asleep else { return }
         var reading = readALS()
         for _ in 0..<3 where reading == nil { Thread.sleep(forTimeInterval: 1); reading = readALS() }   // 刚解锁/唤醒时传感器可能暂时读不到
@@ -320,7 +331,7 @@ final class Controller: ObservableObject {
         let med = history.reduce(0, +) / Double(history.count)
         let target = targetTotal
         DispatchQueue.main.async { self.sensor = als; self.contribution = contrib; self.ambient = med }
-        guard autoEnabled, !manualHold else { return }
+        guard oneShot || (autoEnabled && !manualHold) else { return }
         if !force, Date().timeIntervalSince(lastChange) < minGap { return }
         if !force, (lastAuto.map { abs(Double(cur - $0)) > 5 } ?? false) || (lastAutoCT.map { abs(Double(curCT - $0)) > 200 } ?? false) {
             DispatchQueue.main.async { self.autoEnabled = false }
@@ -664,9 +675,16 @@ struct Popover: View {
             }.disabled(!c.on)
 
             Card {
-                Toggle(isOn: $c.autoEnabled) {
-                    Label("自动调光", systemImage: "sparkles")
-                }.toggleStyle(.switch)
+                HStack {
+                    Toggle(isOn: $c.autoEnabled) {
+                        Label("自动调光", systemImage: "sparkles")
+                    }.toggleStyle(.switch)
+                    Spacer()
+                    Button("立即校准") { c.calibrateNow() }
+                        .controlSize(.small)
+                        .disabled(!c.busy.isEmpty || !c.on)
+                        .help("按当前环境光立刻把总亮度调回目标")
+                }
                 HStack(alignment: .top) {
                     stat("环境光", c.ambient.map { String(Int($0)) } ?? "—")
                     Divider().frame(height: 28)
