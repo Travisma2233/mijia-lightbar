@@ -544,18 +544,17 @@ struct LampPreview: View, Animatable {
                        with: vgrad([Color(red: 0.20, green: 0.32, blue: 0.20).opacity(0), Color(red: 0.14, green: 0.26, blue: 0.15).opacity(0.9)], CGRect(x: 0, y: screen.maxY - 7, width: 1, height: 7)))
             }
 
-            // —— 灯光：灯条在顶边框上投下的柔光，少量漫到屏幕上沿 ——
+            // —— 灯光：灯条主要照亮显示器的顶部边框，只有极淡的一层漫到屏幕上沿（不能过曝）——
             if on {
                 var lit = ctx
                 lit.clip(to: monP)
                 lit.blendMode = .plusLighter
-                lit.addFilter(.blur(radius: 3.2))
-                lit.fill(Path(CGRect(x: cx - 38, y: mon.minY - 1, width: 76, height: 8)), with: .color(tint.opacity(0.65 * glow)))
+                lit.addFilter(.blur(radius: 1.4))
+                lit.fill(Path(CGRect(x: cx - 36, y: mon.minY - 1, width: 72, height: 2.6)), with: .color(tint.opacity(0.55 * glow)))
                 var spill = ctx
                 spill.clip(to: scP)
-                spill.blendMode = .plusLighter
-                spill.addFilter(.blur(radius: 5))
-                spill.fill(Path(ellipseIn: CGRect(x: cx - 36, y: screen.minY - 6, width: 72, height: 10 + 16 * glow)), with: .color(tint.opacity(0.32 * glow)))
+                spill.addFilter(.blur(radius: 3))
+                spill.fill(Path(ellipseIn: CGRect(x: cx - 34, y: screen.minY - 7, width: 68, height: 7 + 5 * glow)), with: .color(tint.opacity(0.13 * glow)))
             }
             // 玻璃反光
             do {
