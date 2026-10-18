@@ -4,7 +4,7 @@
 
 > English: a native SwiftUI menu-bar app for the Xiaomi Mijia Monitor Light Bar 2. It keeps the **total brightness at your desk constant** by reading the Mac's built-in ambient light sensor (no camera), turns the lamp off on lock/sleep and on at unlock, and fades brightness and colour temperature smoothly within ~3 s. Control goes through the Mijia cloud ([mijiaAPI](https://github.com/Do1e/mijia-api)).
 
-<p align="center"><img src="docs/popover.png" width="330" alt="菜单栏浮窗"></p>
+<p align="center"><img src="docs/popover.png" width="330" alt="菜单栏浮窗（浅色）">&nbsp;&nbsp;<img src="docs/popover-dark.png" width="330" alt="菜单栏浮窗（深色）"></p>
 
 ## 功能
 
