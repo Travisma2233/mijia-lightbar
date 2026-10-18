@@ -678,7 +678,7 @@ struct Popover: View {
                 HStack {
                     Toggle(isOn: $c.autoEnabled) {
                         Label("自动调光", systemImage: "sparkles")
-                    }.toggleStyle(.switch)
+                    }.toggleStyle(.switch).fixedSize()   // 不让右边的按钮把标签挤成“自动…”
                     Spacer()
                     Button("立即校准") { c.calibrateNow() }
                         .controlSize(.small)
