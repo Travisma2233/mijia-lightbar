@@ -411,6 +411,73 @@ struct Card<Content: View>: View {
     }
 }
 
+/// 色温(K) → 近似 RGB（Tanner Helland 公式）
+func kelvinColor(_ k: Double) -> Color {
+    let t = max(1000, min(k, 12000)) / 100
+    let r = t <= 66 ? 255 : 329.698727446 * pow(t - 60, -0.1332047592)
+    let g = t <= 66 ? 99.4708025861 * log(t) - 161.1195681661 : 288.1221695283 * pow(t - 60, -0.0755148492)
+    let b = t >= 66 ? 255 : (t <= 19 ? 0 : 138.5177312231 * log(t - 10) - 305.0447927307)
+    func c(_ v: Double) -> Double { max(0, min(255, v)) / 255 }
+    return Color(red: c(r), green: c(g), blue: c(b))
+}
+
+/// 挂在显示器上的挂灯：灯条颜色随色温，光晕和照在屏幕上的光随亮度；关灯时灯条熄灭
+struct LampPreview: View, Animatable {
+    var level: Double      // 亮度 0–100；关灯为 0
+    var ct: Double
+    var animatableData: AnimatablePair<Double, Double> {   // 让亮度和色温的变化在示意图上平滑过渡
+        get { AnimatablePair(level, ct) }
+        set { level = newValue.first; ct = newValue.second }
+    }
+    var body: some View {
+        let on = level > 0.5
+        let bright = level
+        let color = kelvinColor(ct)
+        let glow = on ? min(1, 0.25 + 0.75 * bright / 100) : 0
+        Canvas { ctx, size in
+            let w = size.width, h = size.height
+            let mon = CGRect(x: 4, y: 20, width: w - 8, height: h - 38)           // 显示器外框
+            let screen = mon.insetBy(dx: 3.5, dy: 3.5)                             // 屏幕
+            // 底座
+            var stand = Path()
+            stand.move(to: CGPoint(x: w / 2 - 5, y: mon.maxY)); stand.addLine(to: CGPoint(x: w / 2 + 5, y: mon.maxY))
+            stand.addLine(to: CGPoint(x: w / 2 + 8, y: h - 7)); stand.addLine(to: CGPoint(x: w / 2 - 8, y: h - 7)); stand.closeSubpath()
+            ctx.fill(stand, with: .color(Color(white: 0.35)))
+            ctx.fill(Path(roundedRect: CGRect(x: w / 2 - 17, y: h - 7, width: 34, height: 4), cornerRadius: 2), with: .color(Color(white: 0.3)))
+            // 外框与屏幕
+            ctx.fill(Path(roundedRect: mon, cornerRadius: 6), with: .color(Color(white: 0.16)))
+            ctx.fill(Path(roundedRect: screen, cornerRadius: 3.5),
+                     with: .linearGradient(Gradient(colors: [Color(red: 0.16, green: 0.2, blue: 0.3), Color(red: 0.08, green: 0.1, blue: 0.16)]),
+                                           startPoint: CGPoint(x: 0, y: screen.minY), endPoint: CGPoint(x: 0, y: screen.maxY)))
+            // 照在屏幕上的光（梯形，向下渐隐）
+            if on {
+                var beam = Path()
+                beam.move(to: CGPoint(x: w / 2 - 17, y: mon.minY + 1)); beam.addLine(to: CGPoint(x: w / 2 + 17, y: mon.minY + 1))
+                beam.addLine(to: CGPoint(x: screen.maxX - 2, y: screen.maxY - 2)); beam.addLine(to: CGPoint(x: screen.minX + 2, y: screen.maxY - 2)); beam.closeSubpath()
+                var layer = ctx
+                layer.clip(to: Path(roundedRect: screen, cornerRadius: 3.5))
+                layer.fill(beam, with: .linearGradient(Gradient(colors: [color.opacity(0.55 * glow), color.opacity(0)]),
+                                                       startPoint: CGPoint(x: 0, y: mon.minY), endPoint: CGPoint(x: 0, y: screen.maxY)))
+            }
+            // 灯条光晕 + 灯条
+            let bar = CGRect(x: w / 2 - 20, y: 9, width: 40, height: 7)
+            if on {
+                var g = ctx
+                g.addFilter(.blur(radius: 5 + 5 * glow))
+                g.fill(Path(roundedRect: bar.insetBy(dx: -2, dy: -2), cornerRadius: 5), with: .color(color.opacity(0.9 * glow)))
+            }
+            // 挂在屏幕顶边的支架
+            ctx.fill(Path(roundedRect: CGRect(x: w / 2 - 3, y: 15, width: 6, height: 8), cornerRadius: 1.5), with: .color(Color(white: on ? 0.6 : 0.4)))
+            let barPath = Path(roundedRect: bar, cornerRadius: 3.5)
+            ctx.fill(barPath, with: on
+                     ? .linearGradient(Gradient(colors: [color, color.opacity(0.82)]), startPoint: CGPoint(x: 0, y: bar.minY), endPoint: CGPoint(x: 0, y: bar.maxY))
+                     : .color(Color(white: 0.45)))
+            ctx.stroke(barPath, with: .color(Color(white: 0.25).opacity(on ? 0.45 : 0.25)), lineWidth: 0.8)   // 描边：白色灯条在浅色背景上也看得清
+            if on { ctx.fill(Path(roundedRect: CGRect(x: bar.minX + 3, y: bar.minY + 1.2, width: bar.width - 6, height: 2), cornerRadius: 1), with: .color(.white.opacity(0.55 * glow))) }
+        }
+    }
+}
+
 struct SliderRow: View {
     let icon: String, title: String, unit: String
     @Binding var value: Double
@@ -453,12 +520,20 @@ struct Popover: View {
             }
 
             Card {
-                SliderRow(icon: "sun.max.fill", title: "亮度", unit: "%", value: $c.bright, range: 1...100, step: 1, tint: .orange, onCommit: {
-                    c.setManual(bright: Int(c.bright), ct: Int(c.ct))
-                }, onEditing: { c.editing = $0 })
-                SliderRow(icon: "thermometer.medium", title: "色温", unit: "K", value: $c.ct, range: 2700...6500, step: 100, tint: .blue, onCommit: {
-                    c.setManual(bright: Int(c.bright), ct: Int(c.ct))
-                }, onEditing: { c.editing = $0 })
+                HStack(spacing: 14) {
+                    VStack(spacing: 12) {
+                        SliderRow(icon: "sun.max.fill", title: "亮度", unit: "%", value: $c.bright, range: 1...100, step: 1, tint: .orange, onCommit: {
+                            c.setManual(bright: Int(c.bright), ct: Int(c.ct))
+                        }, onEditing: { c.editing = $0 })
+                        SliderRow(icon: "thermometer.medium", title: "色温", unit: "K", value: $c.ct, range: 2700...6500, step: 100, tint: .blue, onCommit: {
+                            c.setManual(bright: Int(c.bright), ct: Int(c.ct))
+                        }, onEditing: { c.editing = $0 })
+                    }
+                    LampPreview(level: c.on ? c.bright : 0, ct: c.ct)
+                        .animation(.easeInOut(duration: 0.5), value: c.on ? c.bright : 0)
+                        .animation(.easeInOut(duration: 0.5), value: c.ct)
+                        .frame(width: 76, height: 84)
+                }
             }.disabled(!c.on)
 
             Card {
