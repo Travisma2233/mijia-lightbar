@@ -26,8 +26,8 @@ let home = NSHomeDirectory()
 let calibrationPath = home + "/.config/lamp-calibration.json"
 let logPath = home + "/Library/Logs/lightbar.log"
 let ctPoints: [(Double, Double)] = [(5, 3000), (50, 3500), (150, 4000), (450, 4800), (1500, 5500)]  // 环境光 → 色温（“色温跟随环境光”开启时使用）
-let lockDimDelay = 180.0   // 锁屏 / 屏幕关闭后等这么久仍没解锁，先把灯调暗到 lockDim
-let lockOffDelay = 300.0   // 锁屏 / 屏幕关闭后等这么久仍没解锁才关灯（系统睡眠则立刻关）
+let lockDimDelay = 300.0   // 锁屏 / 屏幕关闭后等这么久仍没解锁，先把灯调暗到 lockDim
+let lockOffDelay = 600.0   // 锁屏 / 屏幕关闭后等这么久仍没解锁才关灯（系统睡眠则立刻关）
 let totalTolerance = 10.0   // 总亮度偏离目标超过这么多才调光
 let pollSeconds = 300.0, minChange = 6.0, minChangeCT = 300.0, minGap = 120.0, manualPause = 1800.0
 
@@ -846,7 +846,7 @@ struct Popover: View {
                     settingRow("夜间目标色温", "\(Int(c.nightCT))K") { Stepper("", value: $c.nightCT, in: 2700...6500, step: 100).labelsHidden() }.opacity(c.ctFollow ? 0.4 : 1).disabled(c.ctFollow)
                     settingRow("白天开始", "\(c.dayStart):00") { Stepper("", value: $c.dayStart, in: 0...12).labelsHidden() }
                     settingRow("夜间开始", "\(c.nightStart):00") { Stepper("", value: $c.nightStart, in: 13...23).labelsHidden() }
-                    settingRow("锁屏 3 分钟后调暗到", "\(Int(c.lockDim))%") { Stepper("", value: $c.lockDim, in: 5...50, step: 5).labelsHidden() }
+                    settingRow("锁屏 5 分钟后调暗到", "\(Int(c.lockDim))%") { Stepper("", value: $c.lockDim, in: 5...50, step: 5).labelsHidden() }
                         .opacity(c.lockLinkEnabled ? 1 : 0.4).disabled(!c.lockLinkEnabled)
                     settingRow("仅在家里网络时自动控制", "") { Toggle("", isOn: $c.homeOnly).toggleStyle(.switch).labelsHidden() }
                     settingRow("家里网络", c.homeNetwork.isEmpty ? "未设置" : (c.atHome ? "当前在家" : "当前不在家")) {
