@@ -25,6 +25,7 @@ let home = NSHomeDirectory()
 let calibrationPath = home + "/.config/lamp-calibration.json"
 let logPath = home + "/Library/Logs/lightbar.log"
 let ctPoints: [(Double, Double)] = [(5, 3000), (50, 3500), (150, 4000), (450, 4800), (1500, 5500)]  // 环境光 → 色温（“色温跟随环境光”开启时使用）
+let totalTolerance = 10.0   // 总亮度偏离目标超过这么多才调光
 let pollSeconds = 300.0, minChange = 6.0, minChangeCT = 300.0, minGap = 120.0, manualPause = 1800.0
 
 func log(_ s: String) {
@@ -290,7 +291,11 @@ final class Controller: ObservableObject {
         if rc == 0 {
             appliedOn = want
             log("\(why) → 灯\(want ? "开" : "关")")
-            if want { lastAuto = nil; lastAutoCT = nil; autoAdjust(force: true) } else { refresh() }
+            if want {
+                lastAuto = nil; lastAutoCT = nil
+                // 云端刚写入“开”时立刻读回会拿到旧状态（还是关），等几秒再按环境光调光
+                q.asyncAfter(deadline: .now() + 3) { if !self.locked && !self.asleep { self.autoAdjust(force: true) } }
+            } else { refresh() }
         } else {
             log("控制失败(\(why)): \(out)")
             notifyFail("灯控制失败，可能需要重新登录米家（扫码）")
@@ -300,7 +305,10 @@ final class Controller: ObservableObject {
     // MARK: 自动调光（恒定总亮度）
 
     func autoAdjust(force: Bool = false) {
-        guard !locked, !asleep, let als = readALS() else { return }
+        guard !locked, !asleep else { return }
+        var reading = readALS()
+        for _ in 0..<3 where reading == nil { Thread.sleep(forTimeInterval: 1); reading = readALS() }   // 刚解锁/唤醒时传感器可能暂时读不到
+        guard let als = reading else { log("环境光传感器读取失败，跳过本次调光"); return }
         let (rc, out) = lamp(["json"])
         guard rc == 0, let d = out.data(using: .utf8), let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
               let cur = j["bright"] as? Int, let curCT = j["ct"] as? Int, let isOn = j["on"] as? Bool else { return }
@@ -322,7 +330,8 @@ final class Controller: ObservableObject {
         }
         let want = brightness(forContribution: target - med)
         let wantCT = Int(((ctFollow ? interpolate(med, ctPoints) : targetCT) / 100).rounded()) * 100
-        if force || abs(Double(want - cur)) >= minChange || abs(Double(wantCT - curCT)) >= minChangeCT {
+        let error = med + contrib - target   // 当前总亮度相对目标的偏差
+        if force || (abs(error) >= totalTolerance && want != cur) || abs(Double(wantCT - curCT)) >= minChangeCT {
             lastChange = Date()
             log("传感器 \(Int(als))，扣除灯 \(Int(contrib))，环境光 \(Int(med))，目标总亮度 \(Int(target)) → 亮度 \(cur)→\(want)，色温 \(curCT)→\(wantCT)K（渐变）")
             startRamp(fromB: cur, fromCT: curCT, toB: want, toCT: wantCT)
