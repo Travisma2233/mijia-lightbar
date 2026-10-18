@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""常驻的挂灯控制进程：从 stdin 读一行 JSON 命令，往 stdout 写一行 JSON 结果（保持云端连接，每次约 0.3 秒）。
+命令: {"cmd":"json"} | {"cmd":"on"} | {"cmd":"off"} | {"cmd":"set","b":亮度,"ct":色温} | {"cmd":"bright","v":N} | {"cmd":"ct","v":K}"""
+import json, sys
+from pathlib import Path
+from mijiaAPI import mijiaAPI
+
+cfg = json.loads((Path.home() / ".config/mijia-lamp.json").read_text())
+api = mijiaAPI(str(Path.home() / ".config/mijia-api/auth.json"))
+did = cfg["did"]
+P = {"on": 1, "bright": 2, "ct": 3, "mode": 4}
+
+
+def setp(items):
+    r = api.set_devices_prop([{"did": did, "siid": 2, "piid": p, "value": v} for p, v in items])
+    bad = [x for x in r if x.get("code") != 0]
+    if bad:
+        raise RuntimeError(str(bad))
+
+
+def handle(m):
+    c = m.get("cmd")
+    if c == "json":
+        r = api.get_devices_prop([{"did": did, "siid": 2, "piid": p} for p in P.values()])
+        return json.dumps({k: x.get("value") for k, x in zip(P, r)})
+    if c in ("on", "off"):
+        setp([(P["on"], c == "on")])
+    elif c == "set":
+        setp([(P["bright"], int(m["b"])), (P["ct"], int(m["ct"]))])
+    elif c == "bright":
+        setp([(P["bright"], int(m["v"]))])
+    elif c == "ct":
+        setp([(P["ct"], int(m["v"]))])
+    else:
+        raise ValueError("unknown cmd")
+    return ""
+
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        out = handle(json.loads(line))
+        print(json.dumps({"ok": True, "out": out}, ensure_ascii=False), flush=True)
+    except Exception as e:
+        print(json.dumps({"ok": False, "out": f"{type(e).__name__}: {e}"}, ensure_ascii=False), flush=True)

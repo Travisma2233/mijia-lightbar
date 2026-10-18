@@ -1,0 +1,9 @@
+.DS_Store
+*.app/
+LightBar/LightBar
+*.icns
+icon1024.png
+# 个人凭据与设备信息：绝不要提交
+auth.json
+mijia-lamp.json
+lamp-calibration.json

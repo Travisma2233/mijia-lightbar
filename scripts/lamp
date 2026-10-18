@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""米家显示器挂灯2 命令行：lamp status | on | off | toggle | bright N(1-100) | ct K(2700-6500) | set N K | json
+经米家云端控制（登录凭据 ~/.config/mijia-api/auth.json，设备信息 ~/.config/mijia-lamp.json）。"""
+import json, sys
+from pathlib import Path
+from mijiaAPI import mijiaAPI
+
+cfg = json.loads((Path.home() / ".config/mijia-lamp.json").read_text())
+api = mijiaAPI(str(Path.home() / ".config/mijia-api/auth.json"))
+did = cfg["did"]
+P = {"on": 1, "bright": 2, "ct": 3, "mode": 4}
+
+
+def get():
+    r = api.get_devices_prop([{"did": did, "siid": 2, "piid": p} for p in P.values()])
+    return {k: x.get("value") for k, x in zip(P, r)}
+
+
+def put(piid, value):
+    r = api.set_devices_prop([{"did": did, "siid": 2, "piid": piid, "value": value}])[0]
+    if r.get("code") != 0:
+        sys.exit(f"失败: {r}")
+
+
+def show():
+    s = get()
+    print(f"{'开' if s['on'] else '关'}  亮度 {s['bright']}  色温 {s['ct']}K  模式 {s['mode']}")
+
+
+a = sys.argv[1:] or ["status"]
+cmd = a[0]
+if cmd == "status":
+    show()
+elif cmd in ("on", "off"):
+    put(P["on"], cmd == "on"); show()
+elif cmd == "set" and len(a) == 3:
+    b, k = int(a[1]), int(a[2])
+    if not (1 <= b <= 100 and 2700 <= k <= 6500):
+        sys.exit("亮度 1-100，色温 2700-6500")
+    r = api.set_devices_prop([{"did": did, "siid": 2, "piid": P["bright"], "value": b},
+                              {"did": did, "siid": 2, "piid": P["ct"], "value": k}])
+    if any(x.get("code") != 0 for x in r):
+        sys.exit(f"失败: {r}")
+    show()
+elif cmd == "json":
+    print(json.dumps(get()))
+elif cmd == "toggle":
+    put(P["on"], not get()["on"]); show()
+elif cmd in ("bright", "ct") and len(a) > 1:
+    v = int(a[1])
+    lo, hi = (1, 100) if cmd == "bright" else (2700, 6500)
+    if not lo <= v <= hi:
+        sys.exit(f"范围 {lo}-{hi}")
+    put(P[cmd], v); show()
+else:
+    sys.exit(__doc__)
