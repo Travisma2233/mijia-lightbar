@@ -420,8 +420,16 @@ final class Controller: ObservableObject {
             }
             return
         }
+        // appliedOn 只记录本 App 发出的开关；灯可能已在米家 App / 物理按键 / 断电时被关掉，开灯前先读一次真实状态
+        if want && appliedOn == true && checkHome() {
+            let (rc, out) = lamp(["json"])
+            if rc == 0, let j = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any], let isOn = j["on"] as? Bool {
+                appliedOn = isOn
+            } else { appliedOn = nil }
+        }
         if appliedOn == want { return }
-        guard checkHome() else { log("\(why)：不在家里网络，不控制灯"); return }
+        // 不在家时没动灯，之后灯的实际状态未知，回家后的下一次锁屏联动要重新发命令
+        guard checkHome() else { appliedOn = nil; log("\(why)：不在家里网络，不控制灯"); return }
         rampGen += 1
         let (rc, out) = lamp([want ? "on" : "off"])
         if rc == 0 {
